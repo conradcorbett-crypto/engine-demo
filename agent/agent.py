@@ -10,9 +10,7 @@ from agent.tools import TOOLS
 
 
 def build_agent():
-    # Bug 4: max_tokens=300 truncates responses on longer questions.
-    # Causes response_completeness failures on complex care or diet questions.
-    llm = ChatAnthropic(model="claude-haiku-4-5-20251001", max_tokens=300).bind_tools(TOOLS)
+    llm = ChatAnthropic(model="claude-haiku-4-5-20251001", max_tokens=1024).bind_tools(TOOLS)
 
     def call_model(state: MessagesState, config: RunnableConfig):
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
