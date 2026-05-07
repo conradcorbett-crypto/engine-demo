@@ -114,8 +114,7 @@ TOXIC_FOODS = [
     "Chocolate / caffeine — toxic methylxanthines, fatal",
     "Onions and garlic — destroys red blood cells (Heinz body anemia)",
     "Apple seeds and fruit pits — contain cyanide",
-    # Bug 3: grapes and raisins removed. Agent will not warn users about grape toxicity.
-    # Causes food_safety failures on grape-related questions.
+    "Grapes and raisins — can cause acute kidney failure in birds",
     "Alcohol — fatal even in trace amounts",
     "Salt — leads to dehydration and kidney failure",
     "Mushrooms — toxic to parrots",
