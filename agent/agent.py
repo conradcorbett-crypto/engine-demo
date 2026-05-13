@@ -9,7 +9,7 @@ from agent.tools import TOOLS
 
 
 def build_agent():
-    llm = ChatAnthropic(model="claude-haiku-4-5-20251001", max_tokens=300).bind_tools(TOOLS)
+    llm = ChatAnthropic(model="claude-haiku-4-5-20251001", max_tokens=1500).bind_tools(TOOLS)
 
     def call_model(state: MessagesState, config: RunnableConfig):
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
