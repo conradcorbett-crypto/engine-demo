@@ -28,6 +28,22 @@ load_dotenv(override=True)
 _demo_user = os.getenv("DEMO_USER", "").strip()
 DATASET_NAME = f"pocket-polly-demo-dataset-{_demo_user}" if _demo_user else "pocket-polly-demo-dataset"
 PROJECT_NAME = os.getenv("LANGSMITH_PROJECT", "pocket-polly-demo")
+WORKSPACE_ID = os.getenv("LANGSMITH_WORKSPACE_ID", "").strip()
+
+
+def _ls_headers(api_key: str, json_body: bool = False) -> dict:
+    """Headers for raw LangSmith REST calls.
+
+    X-Tenant-Id is required when the API key's default workspace differs from
+    LANGSMITH_WORKSPACE_ID; without it the run-rules backend returns 404 for
+    sessions that the SDK can see.
+    """
+    headers = {"x-api-key": api_key}
+    if WORKSPACE_ID:
+        headers["X-Tenant-Id"] = WORKSPACE_ID
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    return headers
 
 EVALUATORS = [
     {
@@ -152,7 +168,7 @@ def delete_existing_evaluators(api_key: str) -> None:
     # 1. Delete run rules first
     resp = requests.get(
         "https://api.smith.langchain.com/api/v1/runs/rules",
-        headers={"x-api-key": api_key},
+        headers=_ls_headers(api_key),
     )
     if resp.status_code == 200:
         for rule in resp.json():
@@ -160,14 +176,14 @@ def delete_existing_evaluators(api_key: str) -> None:
             if name in our_keys or name.startswith("pocket-polly-demo-"):
                 requests.delete(
                     f"https://api.smith.langchain.com/api/v1/runs/rules/{rule['id']}",
-                    headers={"x-api-key": api_key},
+                    headers=_ls_headers(api_key),
                 )
 
     # 2. Then delete platform evaluators (run twice to catch any orphans)
     for _ in range(2):
         resp = requests.get(
             "https://api.smith.langchain.com/v1/platform/evaluators",
-            headers={"x-api-key": api_key},
+            headers=_ls_headers(api_key),
         )
         if resp.status_code != 200:
             break
@@ -178,7 +194,7 @@ def delete_existing_evaluators(api_key: str) -> None:
         for ev_id in ids_to_delete:
             requests.delete(
                 f"https://api.smith.langchain.com/v1/platform/evaluators/{ev_id}",
-                headers={"x-api-key": api_key},
+                headers=_ls_headers(api_key),
             )
         if ids_to_delete:
             print(f"  Deleted {len(ids_to_delete)} existing evaluator(s)")
@@ -225,7 +241,7 @@ def create_online_evaluator(api_key: str, ev: dict, project_id: str, model_json:
     }
     resp = requests.post(
         "https://api.smith.langchain.com/api/v1/runs/rules",
-        headers={"x-api-key": api_key, "Content-Type": "application/json"},
+        headers=_ls_headers(api_key, json_body=True),
         json=payload,
     )
     if resp.status_code in (200, 201):
