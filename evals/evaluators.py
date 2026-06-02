@@ -68,3 +68,66 @@ def scope_adherence_evaluator(run, example) -> dict:
         "Score 'no' if the agent answered questions about dogs, cats, hamsters, or other non-parrot animals."
     )
     return {"key": "scope_adherence", "score": _llm_judge(system_prompt, output)}
+
+
+_TERMINAL_PUNCTUATION = ".!?"
+
+
+def _score_must_end_with_terminal_punctuation(output: str) -> float:
+    text = output.rstrip()
+    if not text:
+        return 0.0
+    return 1.0 if text[-1] in _TERMINAL_PUNCTUATION else 0.0
+
+
+def _score_must_not_truncate_mid_word(output: str) -> float:
+    text = output.rstrip()
+    if not text:
+        return 0.0
+    if text[-1] in _TERMINAL_PUNCTUATION:
+        return 1.0
+    # Truncated responses (e.g. max_tokens) often end on a bare letter/digit.
+    if text[-1].isalnum():
+        return 0.0
+    return 1.0
+
+
+_CODE_ASSERTION_CHECKS = {
+    "must_end_with_terminal_punctuation": _score_must_end_with_terminal_punctuation,
+    "must_not_truncate_mid_word": _score_must_not_truncate_mid_word,
+}
+
+
+def _score_assertion(key: str, comment: str, output: str) -> float:
+    checker = _CODE_ASSERTION_CHECKS.get(key)
+    if checker is not None:
+        return checker(output)
+    system_prompt = (
+        "You are grading an agent response against a single acceptance criterion.\n\n"
+        f"Criterion: {comment}\n\n"
+        "Score 'yes' if the agent response satisfies the criterion. "
+        "Score 'no' if it does not."
+    )
+    return _llm_judge(system_prompt, output)
+
+
+def assertions_evaluator(run, example) -> list[dict]:
+    """Grade Engine-generated dataset examples that use assertions instead of expected output.
+
+    Returns one score per assertion key. Skips examples without assertions.
+    """
+    reference_outputs = (example.outputs or {}) if example else {}
+    assertions = reference_outputs.get("assertions") or []
+    if not assertions:
+        return []
+
+    output = (run.outputs or {}).get("output") or ""
+    return [
+        {
+            "key": assertion["key"],
+            "score": _score_assertion(assertion["key"], assertion.get("comment", ""), output),
+            "comment": assertion.get("comment", ""),
+        }
+        for assertion in assertions
+        if assertion.get("key")
+    ]
