@@ -43,10 +43,13 @@ def run_agent_on_example(inputs: dict) -> dict:
 
 
 def run_evaluation(experiment_prefix: str) -> dict:
+    from collections import defaultdict
+
     from langsmith import evaluate
     from evals.evaluators import (
-        tool_selection_evaluator,
+        assertions_evaluator,
         scope_adherence_evaluator,
+        tool_selection_evaluator,
     )
 
     print(f"\nRunning evaluation on dataset '{DATASET_NAME}'...")
@@ -58,27 +61,26 @@ def run_evaluation(experiment_prefix: str) -> dict:
         evaluators=[
             tool_selection_evaluator,
             scope_adherence_evaluator,
+            assertions_evaluator,
         ],
         experiment_prefix=experiment_prefix,
         metadata={"demo": "true", "demo_type": "pocket-polly", "demo_user": demo_user},
     )
 
-    score_buckets = {
-        "tool_selection": [],
-        "scope_adherence": [],
-    }
+    score_buckets: dict[str, list[float]] = defaultdict(list)
 
     for result in results:
         for eval_result in result.get("evaluation_results", {}).get("results", []):
-            if eval_result.key in score_buckets and eval_result.score is not None:
+            if eval_result.score is not None:
                 score_buckets[eval_result.key].append(eval_result.score)
 
     scores = {}
     print(f"\nResults:")
-    for key, values in score_buckets.items():
+    for key in sorted(score_buckets):
+        values = score_buckets[key]
         avg = sum(values) / len(values) if values else 0.0
         scores[key] = avg
-        print(f"  {key:<25} {avg:.2f} ({len(values)} examples)")
+        print(f"  {key:<35} {avg:.2f} ({len(values)} scores)")
 
     return scores
 
