@@ -1,19 +1,23 @@
 """Run offline evaluations on the parrot expert agent.
 
 Used locally and in CI/CD (GitHub Actions runs this on every PR).
-Exits with code 1 if average scores fall below --threshold.
+Exits with code 1 if assertions fail (--require-assertions-pass) or scores
+fall below --threshold (local dev).
 
 Usage:
     python -m scripts.run_evals                          # full run, create/update dataset
     python -m scripts.run_evals --skip-dataset           # reuse existing dataset (CI default)
-    python -m scripts.run_evals --threshold 0.8          # fail if scores below 0.8
-    python -m scripts.run_evals --no-generated           # skip LLM-generated examples
+    python -m scripts.run_evals --dataset NAME           # evaluate a specific LangSmith dataset
+    python -m scripts.run_evals --assertions-only        # only examples with assertions
+    python -m scripts.run_evals --require-assertions-pass  # fail unless all assertions pass
+    python -m scripts.run_evals --threshold 0.8          # fail if tool_selection below 0.8
     python -m scripts.run_evals --setup-online-eval      # also set up online evaluator
 """
 
 import argparse
 import os
 import sys
+from collections import defaultdict
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -42,43 +46,73 @@ def run_agent_on_example(inputs: dict) -> dict:
     return {"output": result["output"], "tools_called": result.get("tools_called", [])}
 
 
-def run_evaluation(experiment_prefix: str) -> dict:
+def fetch_assertion_examples(dataset_name: str) -> list:
+    """Return dataset examples that have non-empty outputs.assertions."""
+    from langsmith import Client
+
+    ls_client = Client()
+    datasets = list(ls_client.list_datasets(dataset_name=dataset_name))
+    if not datasets:
+        raise ValueError(f"Dataset '{dataset_name}' not found in LangSmith.")
+
+    examples = list(ls_client.list_examples(dataset_id=datasets[0].id))
+    assertion_examples = [
+        ex for ex in examples
+        if (ex.outputs or {}).get("assertions")
+    ]
+    if not assertion_examples:
+        raise ValueError(
+            f"Dataset '{dataset_name}' has no examples with assertions. "
+            "Accept Engine offline examples with assertions before running CI."
+        )
+    return assertion_examples
+
+
+def run_evaluation(
+    experiment_prefix: str,
+    *,
+    dataset_name: str,
+    assertions_only: bool = False,
+) -> dict:
     from langsmith import evaluate
     from evals.evaluators import (
-        tool_selection_evaluator,
+        assertions_evaluator,
         scope_adherence_evaluator,
+        tool_selection_evaluator,
     )
 
-    print(f"\nRunning evaluation on dataset '{DATASET_NAME}'...")
+    if assertions_only:
+        evaluators = [assertions_evaluator]
+        data = fetch_assertion_examples(dataset_name)
+        print(f"\nRunning assertion evals on {len(data)} example(s) from '{dataset_name}'...")
+    else:
+        evaluators = [tool_selection_evaluator, scope_adherence_evaluator]
+        data = dataset_name
+        print(f"\nRunning evaluation on dataset '{dataset_name}'...")
 
     demo_user = os.getenv("DEMO_USER", "demo")
     results = evaluate(
         run_agent_on_example,
-        data=DATASET_NAME,
-        evaluators=[
-            tool_selection_evaluator,
-            scope_adherence_evaluator,
-        ],
+        data=data,
+        evaluators=evaluators,
         experiment_prefix=experiment_prefix,
         metadata={"demo": "true", "demo_type": "pocket-polly", "demo_user": demo_user},
     )
 
-    score_buckets = {
-        "tool_selection": [],
-        "scope_adherence": [],
-    }
+    score_buckets: dict[str, list[float]] = defaultdict(list)
 
     for result in results:
         for eval_result in result.get("evaluation_results", {}).get("results", []):
-            if eval_result.key in score_buckets and eval_result.score is not None:
+            if eval_result.score is not None:
                 score_buckets[eval_result.key].append(eval_result.score)
 
     scores = {}
-    print(f"\nResults:")
-    for key, values in score_buckets.items():
+    print("\nResults:")
+    for key in sorted(score_buckets):
+        values = score_buckets[key]
         avg = sum(values) / len(values) if values else 0.0
         scores[key] = avg
-        print(f"  {key:<25} {avg:.2f} ({len(values)} examples)")
+        print(f"  {key:<35} {avg:.2f} ({len(values)} scores)")
 
     return scores
 
@@ -86,10 +120,33 @@ def run_evaluation(experiment_prefix: str) -> dict:
 def check_threshold(scores: dict, threshold: float) -> bool:
     """Returns True if tool_selection meets the threshold."""
     avg = scores.get("tool_selection", 0.0)
-    status = "✅ PASS" if avg >= threshold else "❌ FAIL"
+    status = "PASS" if avg >= threshold else "FAIL"
     print(f"\nThreshold check (>= {threshold}):")
     print(f"  tool_selection: {avg:.2f} {status}")
     return avg >= threshold
+
+
+def check_assertions_pass(scores: dict) -> bool:
+    """Returns True if every assertion key scored 1.0 and at least one was evaluated."""
+    assertion_keys = {
+        key for key in scores
+        if key not in ("tool_selection", "scope_adherence")
+    }
+    if not assertion_keys:
+        print("\nAssertion check: FAIL — no assertion scores found.")
+        return False
+
+    print("\nAssertion check (all must score 1.0):")
+    all_pass = True
+    for key in sorted(assertion_keys):
+        avg = scores[key]
+        passed = avg >= 1.0
+        status = "PASS" if passed else "FAIL"
+        print(f"  {key}: {avg:.2f} {status}")
+        if not passed:
+            all_pass = False
+
+    return all_pass
 
 
 ONLINE_EVALUATORS = [
@@ -176,9 +233,9 @@ def setup_online_eval():
         )
 
         if resp.status_code in (200, 201):
-            print(f"  ✅ Created '{ev['display_name']}' (feedback key: '{ev['feedback_key']}')")
+            print(f"  Created '{ev['display_name']}' (feedback key: '{ev['feedback_key']}')")
         else:
-            print(f"  ⚠️  '{ev['display_name']}' returned {resp.status_code}: {resp.text[:200]}")
+            print(f"  '{ev['display_name']}' returned {resp.status_code}: {resp.text[:200]}")
 
     print("\nOnce set up, LangSmith will automatically score all new traces in the project.")
     print("Scores will appear as 'food_safety' and 'scope_adherence' feedback on each trace.")
@@ -187,33 +244,52 @@ def setup_online_eval():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-dataset", action="store_true", help="Reuse existing dataset (used in CI)")
+    parser.add_argument("--dataset", type=str, default=None, help="LangSmith dataset name (overrides default)")
+    parser.add_argument("--assertions-only", action="store_true", help="Evaluate only examples with assertions")
+    parser.add_argument(
+        "--require-assertions-pass",
+        action="store_true",
+        help="Fail (exit 1) unless every assertion key scores 1.0",
+    )
     parser.add_argument("--no-generated", action="store_true")
     parser.add_argument("--n-generated", type=int, default=8)
     parser.add_argument("--setup-online-eval", action="store_true")
-    parser.add_argument("--threshold", type=float, default=None, help="Fail (exit 1) if avg score below this value")
+    parser.add_argument("--threshold", type=float, default=None, help="Fail (exit 1) if tool_selection avg below value")
     demo_user = os.getenv("DEMO_USER", "demo")
     parser.add_argument("--experiment-prefix", type=str, default=f"after-pocket-polly-demo-{demo_user}")
     args = parser.parse_args()
 
-    if not args.skip_dataset:
+    dataset_name = args.dataset or DATASET_NAME
+
+    if not args.skip_dataset and not args.dataset:
         from evals.dataset import create_or_update_dataset
-        print(f"Preparing dataset '{DATASET_NAME}'...")
+        print(f"Preparing dataset '{dataset_name}'...")
         create_or_update_dataset()
 
-    scores = run_evaluation(experiment_prefix=args.experiment_prefix)
+    scores = run_evaluation(
+        experiment_prefix=args.experiment_prefix,
+        dataset_name=dataset_name,
+        assertions_only=args.assertions_only,
+    )
 
     if args.setup_online_eval:
         setup_online_eval()
 
     print(f"\nView results: https://smith.langchain.com — project '{PROJECT_NAME}'")
 
+    if args.require_assertions_pass:
+        passed = check_assertions_pass(scores)
+        if not passed:
+            print("\nEvals failed — assertions did not pass. Blocking merge.")
+            sys.exit(1)
+        print("\nAll assertions passed.")
+
     if args.threshold is not None:
         passed = check_threshold(scores, args.threshold)
         if not passed:
-            print("\nEvals failed — scores below threshold. Blocking merge.")
+            print("\nEvals failed — scores below threshold.")
             sys.exit(1)
-        else:
-            print("\nAll evals passed. ✅")
+        print("\nAll evals passed threshold.")
 
 
 if __name__ == "__main__":

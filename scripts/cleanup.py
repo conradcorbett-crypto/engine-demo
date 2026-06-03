@@ -1,10 +1,11 @@
 """Clean up LangSmith resources after the pocket-polly demo.
 
 Resets the demo to a clean state so it can be run again without re-running setup:
-  1. Resets dataset to the original 3 examples (deletes Engine-added examples)
-  2. Deletes all experiments — CI/CD generates fresh before/after on every PR
-  3. Removes Engine-added online evaluators (keeps the 5 registered by setup.py)
-  4. Force-resets the fork's main branch to upstream (removes Engine's merged PR)
+  1. Resets baseline dataset to the original 3 examples
+  2. Deletes Engine-created datasets (pocket-polly-engine-{user}-*)
+  3. Deletes all experiments — CI/CD generates fresh before/after on every PR
+  4. Removes Engine-added online evaluators (keeps the 5 registered by setup.py)
+  5. Force-resets the fork's main branch to upstream (removes Engine's merged PR)
 
 Usage:
     python -m scripts.cleanup
@@ -36,7 +37,7 @@ def reset_dataset() -> None:
     from langsmith import Client
     from evals.dataset import EXAMPLES
 
-    print(f"\n[1/3] Resetting dataset '{DATASET_NAME}' to original 3 examples...")
+    print(f"\n[1/5] Resetting dataset '{DATASET_NAME}' to original 3 examples...")
     ls_client = Client()
 
     datasets = list(ls_client.list_datasets(dataset_name=DATASET_NAME))
@@ -59,7 +60,26 @@ def reset_dataset() -> None:
     print(f"  Re-uploaded {len(EXAMPLES)} original examples.")
 
 
-# ── 2. Delete 'after' experiments ─────────────────────────────────────────────
+def delete_engine_datasets() -> None:
+    """Delete Engine-created datasets matching pocket-polly-engine-{DEMO_USER}-*."""
+    from langsmith import Client
+
+    prefix = f"pocket-polly-engine-{_demo_user}-" if _demo_user else "pocket-polly-engine-"
+    print(f"\n[2/5] Removing Engine datasets matching '{prefix}*'...")
+    ls_client = Client()
+
+    deleted = 0
+    for dataset in ls_client.list_datasets():
+        if dataset.name.startswith(prefix):
+            ls_client.delete_dataset(dataset_id=dataset.id)
+            print(f"  Deleted dataset '{dataset.name}'")
+            deleted += 1
+
+    if deleted == 0:
+        print("  No Engine datasets found.")
+
+
+# ── 3. Delete experiments ─────────────────────────────────────────────────────
 
 def delete_ci_experiments() -> None:
     """Delete all experiments linked to the dataset.
@@ -69,7 +89,7 @@ def delete_ci_experiments() -> None:
     """
     from langsmith import Client
 
-    print(f"\n[2/3] Removing all experiments from dataset '{DATASET_NAME}'...")
+    print(f"\n[3/5] Removing all experiments from dataset '{DATASET_NAME}'...")
 
     ls_client = Client()
     datasets = list(ls_client.list_datasets(dataset_name=DATASET_NAME))
@@ -103,7 +123,7 @@ def delete_ci_experiments() -> None:
     print(f"  Deleted {deleted} experiment(s).")
 
 
-# ── 3. Delete Engine-added online evaluators ───────────────────────────────────
+# ── 4. Delete Engine-added online evaluators ───────────────────────────────────
 
 def delete_engine_evaluators(api_key: str) -> None:
     """Delete only the online evaluators Engine added — leave our setup.py ones intact.
@@ -114,7 +134,7 @@ def delete_engine_evaluators(api_key: str) -> None:
     """
     from langsmith import Client
 
-    print(f"\n[3/3] Removing Engine-added online evaluators...")
+    print(f"\n[4/5] Removing Engine-added online evaluators...")
 
     try:
         with open(".demo_state.json") as f:
@@ -162,7 +182,7 @@ def delete_engine_evaluators(api_key: str) -> None:
         print(f"  Deleted {deleted} Engine-added evaluator(s).")
 
 
-# ── 4. Reset fork to upstream main ────────────────────────────────────────────
+# ── 5. Reset fork to upstream main ────────────────────────────────────────────
 
 def reset_fork_to_upstream() -> None:
     """Force-reset the fork's main branch to match upstream langchain-samples/engine-demo.
@@ -172,7 +192,7 @@ def reset_fork_to_upstream() -> None:
     """
     upstream = "langchain-samples/engine-demo"
 
-    print(f"\n[4/4] Resetting fork main branch to upstream '{upstream}'...")
+    print(f"\n[5/5] Resetting fork main branch to upstream '{upstream}'...")
 
     # Get the fork's remote URL from git
     result = subprocess.run(
@@ -230,6 +250,7 @@ def main():
     print(f"  Project:  {PROJECT_NAME}")
 
     reset_dataset()
+    delete_engine_datasets()
     delete_ci_experiments()
     delete_engine_evaluators(api_key)
     reset_fork_to_upstream()

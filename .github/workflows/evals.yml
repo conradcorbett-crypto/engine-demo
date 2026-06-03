@@ -23,6 +23,16 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      - name: Resolve Engine dataset
+        id: engine_dataset
+        env:
+          ENGINE_DATASET_NAME: ${{ secrets.ENGINE_DATASET_NAME }}
+          DEMO_USER: ${{ secrets.DEMO_USER }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: |
+          DATASET=$(uv run python -m scripts.resolve_engine_dataset)
+          echo "name=$DATASET" >> "$GITHUB_OUTPUT"
+
       - name: Run 'before' evals (base branch)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -33,7 +43,11 @@ jobs:
           LANGSMITH_WORKSPACE_ID: ${{ secrets.LANGSMITH_WORKSPACE_ID }}
           DEMO_USER: ${{ secrets.DEMO_USER }}
         run: |
-          uv run python -m scripts.run_evals --skip-dataset --experiment-prefix "before-pocket-polly-demo-$DEMO_USER"
+          uv run python -m scripts.run_evals \
+            --skip-dataset \
+            --dataset "${{ steps.engine_dataset.outputs.name }}" \
+            --assertions-only \
+            --experiment-prefix "before-pocket-polly-demo-$DEMO_USER"
 
       - uses: actions/checkout@v4
         with:
@@ -52,4 +66,9 @@ jobs:
           LANGSMITH_WORKSPACE_ID: ${{ secrets.LANGSMITH_WORKSPACE_ID }}
           DEMO_USER: ${{ secrets.DEMO_USER }}
         run: |
-          uv run python -m scripts.run_evals --skip-dataset --threshold 0.7 --experiment-prefix "after-pocket-polly-demo-$DEMO_USER"
+          uv run python -m scripts.run_evals \
+            --skip-dataset \
+            --dataset "${{ steps.engine_dataset.outputs.name }}" \
+            --assertions-only \
+            --require-assertions-pass \
+            --experiment-prefix "after-pocket-polly-demo-$DEMO_USER"

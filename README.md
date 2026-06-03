@@ -7,7 +7,7 @@ A parrot expert chatbot with intentional bugs, built to demonstrate LangSmith En
 1. **Engine identifies bugs** — the agent has bugs in the prompt and code that cause bad responses
 2. **Engine proposes a PR fix** — targets the root cause code and opens a PR on your fork
 3. **Engine proposes offline examples and online evals to add** — expand dataset coverage and monitoring with one click
-4. **Offline evals in CI/CD** — the PR can't merge until eval scores pass a threshold
+4. **Offline evals in CI/CD** — the PR can't merge until all Engine assertions pass
 5. **Before/after scores in LangSmith** — both "before" and "after" experiments created automatically by CI when Engine opens a PR
 
 ## The bugs
@@ -56,8 +56,9 @@ DEMO_USER=your-name
 > Use a unique `LANGSMITH_PROJECT` name per person (e.g. `pocket-polly-demo-morgan`). Multiple demo-ers sharing the same project name will mix traces and online evaluators. The project is created automatically on first use.
 
 `DEMO_USER` additionally scopes your dataset and experiment names:
-- Dataset: `pocket-polly-demo-dataset-morgan`
-- Experiments: `pocket-polly-demo-morgan-<timestamp>`
+- Baseline dataset: `pocket-polly-demo-dataset-morgan`
+- Engine dataset: `pocket-polly-engine-morgan-<issue-slug>` (created when you accept Engine offline examples)
+- Experiments: `before-pocket-polly-demo-morgan`, `after-pocket-polly-demo-morgan`
 
 **4. Run one-shot setup**
 ```bash
@@ -81,6 +82,8 @@ Runs 13 single-turn queries and 3 multi-turn threaded conversations through the 
 **6. Add GitHub secrets** (for CI/CD)
 
 In your fork: Settings → Secrets → Actions → add `ANTHROPIC_API_KEY`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_WORKSPACE_ID`, and `DEMO_USER`.
+
+Optionally add `ENGINE_DATASET_NAME` as a fallback if Engine has not yet attached dataset metadata to the PR (see CI/CD section).
 
 > **Important:** When pasting secrets, make sure there are no trailing newlines or spaces.
 
@@ -112,12 +115,12 @@ streamlit run app.py
 1. Show PocketPolly UI — ask questions (species lookup, care tips, diet advice, etc.)
 2. Show traces in LangSmith with online eval scores (`food_safety`, `scope_adherence`, etc.)
 3. Engine analyzes traces and identifies root causes across prompt and code
-4. Add Engine-suggested offline examples — show ability to edit in annotation queue
-5. Engine opens a PR on your fork
-6. GitHub Actions runs evals on main (before experiment) and the PR branch (after experiment) — after scores pass ✅
+4. Add Engine-suggested offline examples with **assertions** into a separate Engine dataset (e.g. `pocket-polly-engine-yourname-grapes`) — edit assertions in the annotation queue
+5. Engine opens a PR on your fork (must include dataset metadata — see CI/CD)
+6. GitHub Actions runs assertion evals on the Engine dataset: before (informational) and after (merge gate) — all assertions must pass on the PR branch
 7. Merge the PR
 8. Add Engine-suggested online eval
-9. Show the experiments in LangSmith — before/after score comparison
+9. Show the experiments in LangSmith — before/after assertion score comparison
 
 ### After the demo
 
@@ -129,20 +132,25 @@ python -m scripts.cleanup
 
 | Script | What it does |
 |--------|-------------|
-| `python -m scripts.setup` | One-shot setup: creates dataset and creates 5 online evaluators |
+| `python -m scripts.setup` | One-shot setup: creates baseline dataset and 5 online evaluators |
 | `python -m scripts.generate_traces` | Runs 13 single-turn queries + 3 multi-turn threads through the buggy agent |
-| `python -m scripts.run_evals` | Runs offline evals against the dataset and prints scores |
-| `python -m scripts.run_evals --skip-dataset` | Re-runs evals against existing dataset (used in CI) |
-| `python -m scripts.run_evals --threshold 0.7` | Exits with code 1 if scores < 0.7 (used in CI) |
+| `python -m scripts.run_evals` | Runs offline evals against the baseline dataset and prints scores |
+| `python -m scripts.run_evals --skip-dataset --dataset NAME --assertions-only` | Evaluates only assertion examples in a dataset (CI pattern) |
+| `python -m scripts.run_evals --require-assertions-pass` | Exits with code 1 unless every assertion scores 1.0 (CI merge gate) |
+| `python -m scripts.resolve_engine_dataset` | Resolves Engine dataset name from PR metadata or `ENGINE_DATASET_NAME` |
 | `python -m scripts.cleanup` | Resets demo to clean state — see Cleanup section |
 | `streamlit run app.py` | Start the PocketPolly chat UI |
 
 ## Evaluators
 
-Two LLM-as-judge evaluators run in CI (offline). Claude Haiku scores each 0 or 1:
+### Offline (CI)
 
-- **`tool_selection`** — did the agent ground its response in tool output rather than answering from memory? Goes 0→1 when the bad system prompt is fixed.
-- **`scope_adherence`** — did the agent stay parrot-only and decline non-parrot questions?
+CI evaluates **Engine assertion examples** only (not the baseline 3-example dataset). The `assertions_evaluator` in `evals/evaluators.py` reads each example's `outputs.assertions` and returns one score per assertion key:
+
+- **Code checks** for mechanical assertions (`must_end_with_terminal_punctuation`, `must_not_truncate_mid_word`)
+- **LLM-as-judge** (Claude Haiku) for all other assertion keys, using the assertion's `comment` as the grading criterion
+
+For local dev against the baseline dataset, `tool_selection` and `scope_adherence` LLM judges are still available without `--assertions-only`.
 
 ## Online Evaluators
 
@@ -160,17 +168,28 @@ Add these secrets to your repo (Settings → Secrets → Actions):
 - `LANGSMITH_PROJECT`
 - `LANGSMITH_WORKSPACE_ID`
 - `DEMO_USER`
+- `ENGINE_DATASET_NAME` (optional fallback if PR metadata is missing)
 
-`DEMO_USER` and `LANGSMITH_PROJECT` must match what you used locally — that's how CI finds the right dataset.
+### How CI finds the Engine dataset
+
+CI resolves the Engine-created dataset name (in priority order):
+
+1. `ENGINE_DATASET_NAME` secret / env var
+2. PR label: `engine-dataset:pocket-polly-engine-yourname-grapes`
+3. PR body HTML comment: `<!-- engine-dataset: pocket-polly-engine-yourname-grapes -->`
+4. Branch name: `engine/grapes` → `pocket-polly-engine-{DEMO_USER}-grapes`
+
+### Merge gate
 
 ```
-PR opened → GitHub Actions → run_evals --skip-dataset --threshold 0.7
+PR opened → resolve Engine dataset → run assertion evals (before, informational)
+                                   → run assertion evals (after, --require-assertions-pass)
                                           ↓
-                               scores < 0.7 → ❌ blocks merge
-                               scores ≥ 0.7 → ✅ mergeable
+                               any assertion < 1.0 → blocks merge
+                               all assertions == 1.0 → mergeable
 ```
 
-CI runs evals on both the base branch (creating the "before" experiment) and the PR branch (creating the "after" experiment) in LangSmith automatically. Because `--skip-dataset` fetches the existing dataset from LangSmith by name, any examples Engine adds to the dataset are included in the eval run automatically.
+CI runs evals on both the base branch (creating the "before" experiment) and the PR branch (creating the "after" experiment) against the **Engine dataset only**. Examples without assertions are skipped.
 
 ## Repo structure
 
@@ -181,14 +200,15 @@ agent/
 └── agent.py          # LangGraph ReAct agent (Bug 4 — max_tokens too low)
 
 evals/
-├── dataset.py        # creates per-user LangSmith dataset (3 curated examples)
-└── evaluators.py     # 2 LLM-as-judge offline evaluators (used in CI)
+├── dataset.py        # creates per-user baseline LangSmith dataset (3 curated examples)
+└── evaluators.py     # offline evaluators: assertions (CI) + tool_selection/scope (local)
 
 scripts/
-├── setup.py          # one-shot setup: dataset + online evaluators
-├── generate_traces.py    # populate LangSmith with extra traces and threads
-├── run_evals.py          # offline evals + CI threshold check
-└── cleanup.py            # resets demo to clean state after presentation
+├── setup.py                  # one-shot setup: baseline dataset + online evaluators
+├── generate_traces.py        # populate LangSmith with extra traces and threads
+├── resolve_engine_dataset.py # PR metadata → Engine dataset name (CI)
+├── run_evals.py              # offline evals + assertion merge gate
+└── cleanup.py                # resets demo to clean state after presentation
 
 .github/workflows/
 └── evals.yml         # CI/CD: runs evals on every PR to main
@@ -204,10 +224,11 @@ Run after the demo to reset everything for the next presenter:
 python -m scripts.cleanup
 ```
 
-This does four things:
-1. **Resets dataset to original 3 examples** — deletes all examples and re-uploads the canonical 3, removing anything Engine added
-2. **Deletes all experiments** — CI/CD generates fresh before/after experiments on every PR, so nothing needs to be preserved between demos
-3. **Removes Engine-added online evaluators** — uses saved run rule IDs from `.demo_state.json` to delete only evaluators Engine added, leaving the 5 from `setup.py` in place
-4. **Resets the fork's main branch to upstream** — force-resets to remove Engine's merged PR, restoring the buggy agent state
+This does five things:
+1. **Resets baseline dataset to original 3 examples** — deletes all examples and re-uploads the canonical 3
+2. **Deletes Engine-created datasets** — removes `pocket-polly-engine-{DEMO_USER}-*` datasets
+3. **Deletes all experiments** — CI/CD generates fresh before/after experiments on every PR
+4. **Removes Engine-added online evaluators** — uses saved run rule IDs from `.demo_state.json` to delete only evaluators Engine added, leaving the 5 from `setup.py` in place
+5. **Resets the fork's main branch to upstream** — force-resets to remove Engine's merged PR, restoring the buggy agent state
 
 After cleanup, the demo is ready to run again — no need to re-run `setup.py`.
